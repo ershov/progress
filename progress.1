@@ -75,19 +75,44 @@ monitor only this numeric process ID (ex: \`pidof firefox\`). This option can
 be used multiple times on the command line.
 .TP
 .B \-i (\-\-ignore-file file)
-do not report a process for 'file'. If the file does not exist yet, you must
-give a full and clean absolute path. This option can be used multiple times
-on the command line.
+do not report a process for 'file'.
+This option can be used multiple times on the command line.
+See
+.SM
+.B NOTE About File Paths
+below.
+.TP
+.B \-f (\-\-include-file file)
+report a process for 'file'.
+This option can be used multiple times on the command line.
+See
+.SM
+.B NOTE About File Paths
+below.
 .TP
 .B \-o (\-\-open-mode {r|w})
 report only files opened for read or write by the process. This option is
 useful when you want to monitor only output files (or input ones) of a process.
+.TP
+.B \-A (\-\-all-files)
+report all files of the process, not just the biggest one. This is useful when
+monitoring processes with multiple inputs or outputs like multistream ffmpeg
+conversion.
 .TP
 .B \-v (\-\-version)
 show program version and exit
 .TP
 .B \-h (\-\-help)
 display help message and exit
+
+.SH NOTE About File Paths
+If the specified file contains '/', it's treated as exact file name.
+If the file does not exist yet, you must give a full and clean absolute path.
+.PP
+If the given file doesn't have a '/' in it, it's treated as file mask which is
+matched against the file name portion of the full path.
+To specify an exact file name in the current directory, use "./file".
+
 
 .SH ENVIRONMENT
 It's possible to give permanent options using PROGRESS_ARGS environment variable.

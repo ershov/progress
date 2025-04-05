@@ -32,6 +32,7 @@
 #include <assert.h>
 #include <curses.h>
 #include <locale.h>
+#include <fnmatch.h>
 
 #include <wordexp.h>
 #include <getopt.h>
@@ -95,6 +96,8 @@ static int proc_specifiq_name_cnt;
 static char **proc_specifiq_name;
 static int ignore_file_list_cnt;
 static char **ignore_file_list;
+static int include_file_list_cnt;
+static char **include_file_list;
 static int proc_specifiq_pid_cnt;
 static pid_t *proc_specifiq_pid;
 
@@ -104,6 +107,7 @@ signed char flag_throughput = 0;
 signed char flag_monitor = 0;
 signed char flag_monitor_continuous = 0;
 signed char flag_open_mode = 0;
+signed char flag_all_files = 0;
 double throughput_wait_secs = 1;
 
 WINDOW *mainwin;
@@ -149,14 +153,57 @@ else
 }
 
 
-signed char is_ignored_file(char *str)
+char *simple_basename(char *str)
+{
+char *p;
+p = strrchr(str, '/');
+return p ? p + 1 : str;
+}
+
+int is_fullpath(char *str)
+{
+return strchr(str, '/') != NULL;
+}
+
+signed char is_file_in_list(char *str, char **file_list, int file_list_cnt)
 {
 int i;
-for (i = 0 ; i < ignore_file_list_cnt ; i++)
-    if (!strcmp(ignore_file_list[i], str))
-        return 1;
+for (i = 0 ; i < file_list_cnt ; i++) {
+    if (is_fullpath(file_list[i])) {
+        if (!strcmp(file_list[i], str))
+            return 1;
+    } else {
+        if (!fnmatch(file_list[i], simple_basename(str), 0))
+            return 1;
+    }
+}
 return 0;
 }
+
+signed char is_ignored_file(char *str)
+{
+return is_file_in_list(str, ignore_file_list, ignore_file_list_cnt);
+}
+
+signed char is_included_file(char *str)
+{
+return is_file_in_list(str, include_file_list, include_file_list_cnt);
+}
+
+signed char include_file(char *str)
+{
+if (include_file_list_cnt && !is_included_file(str))
+    return 0;
+return !is_ignored_file(str);
+}
+
+signed char include_files(char *str1, char *str2)
+{
+if (include_file_list_cnt && (is_included_file(str1) || is_included_file(str2)))
+    return 1;
+return !is_ignored_file(str1) && !is_ignored_file(str2);
+}
+
 
 #ifdef __APPLE__
 int find_pid_by_id(pid_t pid, pidinfo_t *pid_list)
@@ -185,7 +232,7 @@ pids = malloc(nb_processes * sizeof(pid_t));
 assert(pids != NULL);
 
 proc_listpids(PROC_ALL_PIDS, 0, pids, nb_processes);
-for(i = 0; i < nb_processes; ++i) {
+for(i = 0; i < nb_processes && pid_count < max_pids; ++i) {
     if (pids[i] == 0) {
         continue;
     }
@@ -194,7 +241,7 @@ for(i = 0; i < nb_processes; ++i) {
         pid_list[pid_count].pid=pids[i];
         strcpy(pid_list[pid_count].name, bin_name);
         pid_count++;
-        if(pid_count==max_pids)
+        if(pid_count>=max_pids)
             break;
     }
 }
@@ -241,7 +288,7 @@ if (!proc) {
     exit(EXIT_FAILURE);
 }
 
-while ((direntp = readdir(proc)) != NULL) {
+while (pid_count < max_pids && (direntp = readdir(proc)) != NULL) {
     snprintf(fullpath_dir, MAXPATHLEN, "%s/%s", PROC_PATH, direntp->d_name);
 
     if (stat(fullpath_dir, &stat_buf) == -1) {
@@ -269,7 +316,7 @@ while ((direntp = readdir(proc)) != NULL) {
             pid_list[pid_count].pid = atol(direntp->d_name);
             strcpy(pid_list[pid_count].name, bin_name);
             pid_count++;
-            if(pid_count == max_pids)
+            if(pid_count >= max_pids)
                 break;
         }
     }
@@ -337,7 +384,7 @@ procs = procstat_getprocs(procstat, KERN_PROC_PROC, 0, &proc_count);
 if (procs == NULL)
     goto done;
 
-for (i = 0; i < proc_count; i++) {
+for (i = 0; i < proc_count && pid_count < max_pids; i++) {
     proc = &procs[i];
     procstat_getpathname(procstat, proc, pathname, sizeof(pathname));
     if (strlen(pathname) == 0)
@@ -348,7 +395,7 @@ for (i = 0; i < proc_count; i++) {
         pid_list[pid_count].pid = proc->ki_pid;
         strcpy(pid_list[pid_count].name, bin_name);
         pid_count++;
-        if (pid_count == max_pids)
+        if (pid_count >= max_pids)
             break;
     }
 }
@@ -362,26 +409,34 @@ return pid_count;
 #endif // __FreeBSD__
 
 #ifdef __APPLE__
+
+static struct proc_fdinfo procFDInfo[MAX_FD_PER_PID];
+
 int find_fd_for_pid(pid_t pid, int *fd_list, int max_fd)
 {
 int count = 0;
-int bufferSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, 0, 0);
-struct stat stat_buf;
 
-if (bufferSize < 0) {
+int proc_pidinfo_sz = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, procFDInfo, sizeof(procFDInfo));
+if (proc_pidinfo_sz < 0) {
     printf("Error :/, cannot proc_pidinfo\n");
     return 0;
 }
-struct proc_fdinfo *procFDInfo = (struct proc_fdinfo *)malloc(bufferSize);
-assert(procFDInfo != NULL);
-proc_pidinfo(pid, PROC_PIDLISTFDS, 0, procFDInfo, bufferSize);
-int numberOfProcFDs = bufferSize / PROC_PIDLISTFD_SIZE;
+int numberOfProcFDs = proc_pidinfo_sz / PROC_PIDLISTFD_SIZE;
 int i;
 
 for(i = 0; i < numberOfProcFDs; i++) {
     if(procFDInfo[i].proc_fdtype == PROX_FDTYPE_VNODE) {
         struct vnode_fdinfowithpath vnodeInfo;
-        proc_pidfdinfo(pid, procFDInfo[i].proc_fd, PROC_PIDFDVNODEPATHINFO, &vnodeInfo, PROC_PIDFDVNODEPATHINFO_SIZE);
+
+        int proc_pidfdinfo_status = proc_pidfdinfo(pid, procFDInfo[i].proc_fd,
+            PROC_PIDFDVNODEPATHINFO, &vnodeInfo, PROC_PIDFDVNODEPATHINFO_SIZE);
+        if (proc_pidfdinfo_status != PROC_PIDFDVNODEPATHINFO_SIZE) {
+            if (flag_debug)
+                perror("proc_pidfdinfo");
+            continue;
+        }
+
+        struct stat stat_buf;
         if (stat(vnodeInfo.pvip.vip_path, &stat_buf) < 0) {
             if (flag_debug)
                 perror("sstat");
@@ -390,14 +445,24 @@ for(i = 0; i < numberOfProcFDs; i++) {
         if (!S_ISREG(stat_buf.st_mode) && !S_ISBLK(stat_buf.st_mode))
             continue;
 
-        if (is_ignored_file(vnodeInfo.pvip.vip_path))
+        if (!include_file(vnodeInfo.pvip.vip_path))
+            continue;
+
+        int dup = 0;
+        for (int j = 0; j < count; j++) {
+            if (fd_list[j] == procFDInfo[i].proc_fd) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup)
             continue;
 
         // OK, we've found a potential interesting file.
 
         fd_list[count++] = procFDInfo[i].proc_fd;
         //~ printf("[debug] %s\n",vnodeInfo.pvip.vip_path);
-        if(count == max_fd)
+        if(count >= max_fd)
             break;
     }
 }
@@ -453,7 +518,7 @@ while ((direntp = readdir(proc)) != NULL) {
     if (stat(link_dest, &stat_buf) == -1)
         continue;
 
-    if (is_ignored_file(fullpath) || is_ignored_file(link_dest))
+    if (!include_files(fullpath, link_dest))
         continue;
 
     // OK, we've found a potential interesting file.
@@ -511,7 +576,7 @@ for (i = 0; i < proc_count; i++) {
         if (!(vn.vn_type == PS_FST_VTYPE_VREG || vn.vn_type == PS_FST_VTYPE_VBLK))
             continue;
 
-        if (is_ignored_file(fstat->fs_path))
+        if (!include_file(fstat->fs_path))
             continue;
 
         // OK, we've found a potential interesting file.
@@ -754,14 +819,16 @@ static struct option long_options[] = {
     {"command",              required_argument, 0, 'c'},
     {"pid",                  required_argument, 0, 'p'},
     {"ignore-file",          required_argument, 0, 'i'},
+    {"include-file",         required_argument, 0, 'f'},
+    {"all-files",            no_argument,       0, 'A'},
     {"open-mode",            required_argument, 0, 'o'},
     {0, 0, 0, 0}
 };
 
-static char *options_string = "vqdwmMha:c:p:W:i:o:";
+static char *options_string = "vqdwmMhAa:c:p:W:i:f:o:";
 int c,i;
 int option_index = 0;
-char *rp;
+char *rp, *path;
 
 optind = 1; // reset getopt
 
@@ -797,7 +864,9 @@ while(1) {
             printf("  -c --command cmd             monitor only this command name (ex: firefox)\n");
             printf("  -p --pid id                  monitor only this process ID (ex: `pidof firefox`)\n");
             printf("  -i --ignore-file file        do not report process if using file\n");
+            printf("  -f --include-file file       report process if using file\n");
             printf("  -o --open-mode {r|w|u}       report only files opened for read, write, or read and write\n");
+            printf("  -A --all-files               report all files of the process, not just the biggest one\n");
             printf("  -v --version                 show program version and exit\n");
             printf("  -h --help                    display this help and exit\n");
             printf("\n\n");
@@ -814,14 +883,19 @@ while(1) {
             break;
 
         case 'i':
-            rp = realpath(optarg, NULL);
             ignore_file_list_cnt++;
             ignore_file_list = realloc(ignore_file_list, ignore_file_list_cnt * sizeof(char *));
             assert(ignore_file_list != NULL);
-            if (rp)
-                ignore_file_list[ignore_file_list_cnt - 1] = rp;
-            else
-                ignore_file_list[ignore_file_list_cnt - 1] = strdup(optarg); // file does not exist yet, it seems
+            path = (is_fullpath(optarg) && (rp = realpath(optarg, NULL))) ? rp : strdup(optarg);
+            include_file_list[include_file_list_cnt - 1] = path;
+            break;
+
+        case 'f':
+            include_file_list_cnt++;
+            include_file_list = realloc(include_file_list, include_file_list_cnt * sizeof(char *));
+            assert(include_file_list != NULL);
+            path = (is_fullpath(optarg) && (rp = realpath(optarg, NULL))) ? rp : strdup(optarg);
+            include_file_list[include_file_list_cnt - 1] = path;
             break;
 
         case 'a':
@@ -851,6 +925,10 @@ while(1) {
 
         case 'm':
             flag_monitor = 1;
+            break;
+
+        case 'A':
+            flag_all_files = 1;
             break;
 
         case 'M':
@@ -910,11 +988,13 @@ static int old_result_count = 0;
 
 if (copy) {
     int i;
-    for (i = 0; i < old_result_count; ++i) {
+    for (i = 0; i < old_result_count && i < MAX_RESULTS; ++i) {
         int j;
         char found = 0;
         for (j = 0; j < result_count; ++j) {
-            if (results[j].pid.pid == old_results[i].pid.pid) {
+            if (results[j].pid.pid == old_results[i].pid.pid &&
+                results[j].fd.num == old_results[i].fd.num &&
+                !strcmp(results[j].fd.name, old_results[i].fd.name)) {
                 found = 1;
                 results[j].hbegin = old_results[i].hbegin;
                 results[j].hend = old_results[i].hend;
@@ -1026,44 +1106,42 @@ if (!pid_count) {
     return 0;
 }
 
+#define ADD_RESULT(PID, FD) do { \
+    results[result_count].pid = PID; \
+    results[result_count].fd = FD; \
+    results[result_count].hbegin = NULL; \
+    results[result_count].hend = NULL; \
+    results[result_count].hsize = 0; \
+    result_count++; \
+} while(0) // EOM
+
 result_count = 0;
 
-for (i = 0 ; i < pid_count ; i++) {
+for (i = 0 ; i < pid_count && result_count < MAX_RESULTS; i++) {
     fd_count = find_fd_for_pid(pidinfo_list[i].pid, fdnum_list, MAX_FD_PER_PID);
 
     max_size = 0;
 
     // let's find the biggest opened file
-    for (j = 0 ; j < fd_count ; j++) {
+    for (j = 0 ; j < fd_count && result_count < MAX_RESULTS ; j++) {
         get_fdinfo(pidinfo_list[i].pid, fdnum_list[j], &fdinfo);
 
         // only select files with specified open mode
         if (flag_open_mode && flag_open_mode != fdinfo.mode)
             continue;
 
-        if (fdinfo.size > max_size) {
+        if (flag_all_files) {
+            ADD_RESULT(pidinfo_list[i], fdinfo);
+        } else if (fdinfo.size > max_size) {
             biggest_fd = fdinfo;
             max_size = fdinfo.size;
         }
     }
 
-    if (!max_size) { // nothing found
-    // this display is the root of too many confusion for the users, let's
-    // remove it. And it does not play well with --i option.
-/*        nprintf("[%5d] %s inactive/flushing/streaming/...\n",
-                pidinfo_list[i].pid,
-                pidinfo_list[i].name);*/
-        continue;
+    if (!flag_all_files && max_size) {
+        // We've our biggest_fd now, let's store the result
+        ADD_RESULT(pidinfo_list[i], biggest_fd);
     }
-
-    // We've our biggest_fd now, let's store the result
-    results[result_count].pid = pidinfo_list[i];
-    results[result_count].fd = biggest_fd;
-    results[result_count].hbegin = NULL;
-    results[result_count].hend = NULL;
-    results[result_count].hsize = 0;
-
-    result_count++;
 }
 
 // wait a bit, so we can estimate the throughput
@@ -1073,7 +1151,10 @@ if (flag_monitor || flag_monitor_continuous) {
     clear();
 }
 copy_and_clean_results(results, result_count, 1);
+
 for (i = 0 ; i < result_count ; i++) {
+    if (i > 0 && results[i].pid.pid != results[i-1].pid.pid)
+        nprintf("\n");
 
     if (flag_throughput && !first_pass) {
         still_there = get_fdinfo(results[i].pid.pid, results[i].fd.num, &fdinfo);
@@ -1123,7 +1204,7 @@ for (i = 0 ; i < result_count ; i++) {
     }
 
 
-    nprintf("\n\n");
+    nprintf("\n");
 
     // Need to work on window width when using screen/watch/...
     //~ printf("    [");
